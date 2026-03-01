@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 // --- Mocks ---
 
@@ -25,6 +28,14 @@ type Handler = (...args: any[]) => any;
 const botRef = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock('grammy', () => ({
+  InputFile: class MockInputFile {
+    source: string;
+    filename?: string;
+    constructor(source: string, filename?: string) {
+      this.source = source;
+      this.filename = filename;
+    }
+  },
   Bot: class MockBot {
     token: string;
     commandHandlers = new Map<string, Handler>();
@@ -33,6 +44,8 @@ vi.mock('grammy', () => ({
 
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendPhoto: vi.fn().mockResolvedValue(undefined),
+      sendDocument: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -775,6 +788,83 @@ describe('TelegramChannel', () => {
       await channel.sendMessage('tg:100200300', 'No bot');
 
       // No error, no API call
+    });
+
+    it('sends photo when text uses [Photo: path] directive', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const photoPath = path.join(
+        os.tmpdir(),
+        `nanoclaw-test-photo-${Date.now()}.jpg`,
+      );
+      fs.writeFileSync(photoPath, 'photo');
+      try {
+        await channel.sendMessage(
+          'tg:100200300',
+          `[Photo: ${photoPath}] test caption`,
+        );
+
+        expect(currentBot().api.sendPhoto).toHaveBeenCalledTimes(1);
+        expect(currentBot().api.sendPhoto).toHaveBeenCalledWith(
+          '100200300',
+          expect.any(Object),
+          { caption: 'test caption' },
+        );
+        expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+      } finally {
+        fs.unlinkSync(photoPath);
+      }
+    });
+
+    it('sends document when text uses [Document: name - path] directive', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const docPath = path.join(
+        os.tmpdir(),
+        `nanoclaw-test-doc-${Date.now()}.txt`,
+      );
+      fs.writeFileSync(docPath, 'doc');
+      try {
+        await channel.sendMessage(
+          'tg:100200300',
+          `[Document: report.txt - ${docPath}] please review`,
+        );
+
+        expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
+        expect(currentBot().api.sendDocument).toHaveBeenCalledWith(
+          '100200300',
+          expect.any(Object),
+          { caption: 'please review' },
+        );
+        expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+      } finally {
+        fs.unlinkSync(docPath);
+      }
+    });
+
+    it('falls back to text when media file does not exist', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const missingPath = path.join(
+        os.tmpdir(),
+        `nanoclaw-missing-${Date.now()}.jpg`,
+      );
+      await channel.sendMessage(
+        'tg:100200300',
+        `[Photo: ${missingPath}] caption`,
+      );
+
+      expect(currentBot().api.sendPhoto).not.toHaveBeenCalled();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        `[Photo: ${missingPath}] caption`,
+      );
     });
   });
 

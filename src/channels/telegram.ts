@@ -1,4 +1,4 @@
-import { Bot } from 'grammy';
+import { Bot, InputFile } from 'grammy';
 import fs from 'fs';
 import path from 'path';
 import { pipeline } from 'stream/promises';
@@ -93,6 +93,48 @@ export class TelegramChannel implements Channel {
     const timestamp = Date.now();
     const random = Math.random().toString(36).substring(2, 8);
     return `${prefix}_${timestamp}_${random}.${ext}`;
+  }
+
+  private parseOutboundMediaDirective(
+    text: string,
+  ):
+    | {
+        type: 'photo' | 'document';
+        filePath: string;
+        caption: string;
+        fileName?: string;
+      }
+    | null {
+    const photoMatch = text.match(/^\[Photo:\s*([^\]]+)\](?:\s*([\s\S]*))?$/);
+    if (photoMatch) {
+      return {
+        type: 'photo',
+        filePath: photoMatch[1].trim(),
+        caption: (photoMatch[2] || '').trim(),
+      };
+    }
+
+    const docMatch = text.match(
+      /^\[Document:\s*([^\]]+)\](?:\s*([\s\S]*))?$/,
+    );
+    if (!docMatch) return null;
+
+    const descriptor = docMatch[1].trim();
+    const caption = (docMatch[2] || '').trim();
+    const sepIdx = descriptor.lastIndexOf(' - ');
+    if (sepIdx === -1) {
+      return {
+        type: 'document',
+        filePath: descriptor,
+        fileName: path.basename(descriptor) || 'file',
+        caption,
+      };
+    }
+
+    const fileName = descriptor.slice(0, sepIdx).trim() || 'file';
+    const filePath = descriptor.slice(sepIdx + 3).trim();
+    if (!filePath) return null;
+    return { type: 'document', filePath, fileName, caption };
   }
 
   async connect(): Promise<void> {
@@ -381,6 +423,46 @@ export class TelegramChannel implements Channel {
 
     try {
       const numericId = jid.replace(/^tg:/, '');
+      const media = this.parseOutboundMediaDirective(text);
+
+      if (media) {
+        if (!fs.existsSync(media.filePath) || !fs.statSync(media.filePath).isFile()) {
+          logger.warn(
+            { jid, mediaType: media.type, filePath: media.filePath },
+            'Media file not found, falling back to text send',
+          );
+        } else if (media.type === 'photo') {
+          await this.bot.api.sendPhoto(
+            numericId,
+            new InputFile(media.filePath),
+            media.caption ? { caption: media.caption } : undefined,
+          );
+          logger.info(
+            { jid, filePath: media.filePath, hasCaption: !!media.caption },
+            'Telegram photo sent',
+          );
+          return;
+        } else {
+          await this.bot.api.sendDocument(
+            numericId,
+            new InputFile(
+              media.filePath,
+              media.fileName || path.basename(media.filePath) || 'file',
+            ),
+            media.caption ? { caption: media.caption } : undefined,
+          );
+          logger.info(
+            {
+              jid,
+              filePath: media.filePath,
+              fileName: media.fileName,
+              hasCaption: !!media.caption,
+            },
+            'Telegram document sent',
+          );
+          return;
+        }
+      }
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
