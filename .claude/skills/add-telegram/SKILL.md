@@ -47,13 +47,21 @@ npx tsx scripts/apply-skill.ts .claude/skills/add-telegram
 
 This deterministically:
 - Adds `src/channels/telegram.ts` (TelegramChannel class implementing Channel interface)
-- Adds `src/channels/telegram.test.ts` (46 unit tests)
+- Adds `src/channels/telegram.test.ts` (Telegram channel unit tests)
 - Three-way merges Telegram support into `src/index.ts` (multi-channel support, findChannel routing)
 - Three-way merges Telegram config into `src/config.ts` (TELEGRAM_BOT_TOKEN, TELEGRAM_ONLY exports)
 - Three-way merges updated routing tests into `src/routing.test.ts`
 - Installs the `grammy` npm dependency
 - Updates `.env.example` with `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ONLY`
 - Records the application in `.nanoclaw/state.yaml`
+
+The applied Telegram channel supports:
+- Text send/receive
+- Inbound media placeholders (`[Photo]`, `[Document: ...]`, etc.)
+- Inbound photo/document file download with local path forwarding to the agent
+- Outbound media via message directives:
+  - `[Photo: /absolute/path/to/image.jpg] optional caption`
+  - `[Document: filename.ext - /absolute/path/to/file.ext] optional caption`
 
 If the apply reports merge conflicts, read the intent files:
 - `modify/src/index.ts.intent.md` — what changed and invariants for index.ts
@@ -177,6 +185,17 @@ Tell the user:
 > - For non-main: `@Andy hello` or @mention the bot
 >
 > The bot should respond within a few seconds.
+
+### Test media sending (integrated channel path)
+
+Ask the user to send a message that makes the agent produce one of these outputs:
+
+```
+[Photo: /absolute/path/to/image.jpg] caption text
+[Document: notes.pdf - /absolute/path/to/notes.pdf] caption text
+```
+
+These are handled by `TelegramChannel.sendMessage()` and sent through Telegram Bot API directly (no extra curl scripts required).
 
 ### Check logs if needed
 

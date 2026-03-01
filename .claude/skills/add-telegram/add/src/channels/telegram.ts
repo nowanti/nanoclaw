@@ -1,4 +1,7 @@
-import { Bot } from 'grammy';
+import { Bot, InputFile } from 'grammy';
+import fs from 'fs';
+import path from 'path';
+import { pipeline } from 'stream/promises';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { logger } from '../logger.js';
@@ -21,10 +24,117 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private downloadPath: string;
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
     this.opts = opts;
+    // 图片保存路径 - 使用相对于项目根目录的路径
+    this.downloadPath =
+      process.env.TELEGRAM_DOWNLOAD_PATH || path.resolve('groups/main/inputs');
+    this.ensureDownloadPath();
+  }
+
+  private ensureDownloadPath(): void {
+    if (!fs.existsSync(this.downloadPath)) {
+      fs.mkdirSync(this.downloadPath, { recursive: true });
+      logger.info({ path: this.downloadPath }, 'Created download directory');
+    }
+  }
+
+  /**
+   * 下载 Telegram 文件
+   * @param fileId - Telegram file_id
+   * @param filename - 保存的文件名
+   * @returns 本地文件路径
+   */
+  private async downloadFile(
+    fileId: string,
+    filename: string,
+  ): Promise<string | null> {
+    try {
+      if (!this.bot) return null;
+
+      // 获取文件信息
+      const file = await this.bot.api.getFile(fileId);
+      if (!file.file_path) {
+        logger.warn({ fileId }, 'No file_path in getFile response');
+        return null;
+      }
+
+      // 构建下载 URL
+      const fileUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+      const localPath = path.join(this.downloadPath, filename);
+
+      // 下载文件
+      const response = await fetch(fileUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const fileStream = fs.createWriteStream(localPath);
+      await pipeline(response.body as any, fileStream);
+
+      logger.info(
+        { fileId, localPath, size: fs.statSync(localPath).size },
+        'File downloaded',
+      );
+      return localPath;
+    } catch (err) {
+      logger.error({ fileId, err }, 'Failed to download file');
+      return null;
+    }
+  }
+
+  /**
+   * 生成唯一文件名
+   */
+  private generateFilename(prefix: string, ext: string): string {
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(2, 8);
+    return `${prefix}_${timestamp}_${random}.${ext}`;
+  }
+
+  private parseOutboundMediaDirective(
+    text: string,
+  ):
+    | {
+        type: 'photo' | 'document';
+        filePath: string;
+        caption: string;
+        fileName?: string;
+      }
+    | null {
+    const photoMatch = text.match(/^\[Photo:\s*([^\]]+)\](?:\s*([\s\S]*))?$/);
+    if (photoMatch) {
+      return {
+        type: 'photo',
+        filePath: photoMatch[1].trim(),
+        caption: (photoMatch[2] || '').trim(),
+      };
+    }
+
+    const docMatch = text.match(
+      /^\[Document:\s*([^\]]+)\](?:\s*([\s\S]*))?$/,
+    );
+    if (!docMatch) return null;
+
+    const descriptor = docMatch[1].trim();
+    const caption = (docMatch[2] || '').trim();
+    const sepIdx = descriptor.lastIndexOf(' - ');
+    if (sepIdx === -1) {
+      return {
+        type: 'document',
+        filePath: descriptor,
+        fileName: path.basename(descriptor) || 'file',
+        caption,
+      };
+    }
+
+    const fileName = descriptor.slice(0, sepIdx).trim() || 'file';
+    const filePath = descriptor.slice(sepIdx + 3).trim();
+    if (!filePath) return null;
+    return { type: 'document', filePath, fileName, caption };
   }
 
   async connect(): Promise<void> {
@@ -72,8 +182,6 @@ export class TelegramChannel implements Channel {
           : (ctx.chat as any).title || chatJid;
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
-      // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
-      // (e.g., ^@Andy\b), so we prepend the trigger when the bot is @mentioned.
       const botUsername = ctx.me?.username?.toLowerCase();
       if (botUsername) {
         const entities = ctx.message.entities || [];
@@ -92,8 +200,15 @@ export class TelegramChannel implements Channel {
       }
 
       // Store chat metadata for discovery
-      const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      this.opts.onChatMetadata(chatJid, timestamp, chatName, 'telegram', isGroup);
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        chatName,
+        'telegram',
+        isGroup,
+      );
 
       // Only deliver full message for registered groups
       const group = this.opts.registeredGroups()[chatJid];
@@ -122,7 +237,118 @@ export class TelegramChannel implements Channel {
       );
     });
 
-    // Handle non-text messages with placeholders so the agent knows something was sent
+    // Handle photo messages with download
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+
+      // 获取最大尺寸的图片（某些测试/边界场景可能没有 photo 数组）
+      const photos = ctx.message.photo;
+      const largestPhoto =
+        Array.isArray(photos) && photos.length > 0
+          ? photos[photos.length - 1]
+          : null;
+      const fileId = largestPhoto?.file_id;
+
+      // 下载图片（仅当存在 file_id）
+      let localPath: string | null = null;
+      if (fileId) {
+        const filename = this.generateFilename('photo', 'jpg');
+        localPath = await this.downloadFile(fileId, filename);
+      }
+
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      // 发送带文件路径的消息给 agent
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content: localPath
+          ? `[Photo: ${localPath}]${caption}`
+          : `[Photo]${caption}`,
+        timestamp,
+        is_from_me: false,
+      });
+
+      logger.info(
+        { chatJid, sender: senderName, fileId, localPath },
+        'Telegram photo received and downloaded',
+      );
+    });
+
+    // Handle document messages with download
+    this.bot.on('message:document', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+
+      const doc = ctx.message.document;
+      const fileName = doc?.file_name || 'file';
+      const fileId = doc?.file_id;
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+
+      // 下载文档
+      let localPath: string | null = null;
+      if (fileId) {
+        const ext = path.extname(fileName).slice(1) || 'bin';
+        const filename = this.generateFilename('doc', ext);
+        localPath = await this.downloadFile(fileId, filename);
+      }
+
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content: localPath
+          ? `[Document: ${fileName} - ${localPath}]${caption}`
+          : `[Document: ${fileName}]${caption}`,
+        timestamp,
+        is_from_me: false,
+      });
+
+      logger.info(
+        { chatJid, sender: senderName, fileName, localPath },
+        'Telegram document received and downloaded',
+      );
+    });
+
+    // Handle other non-text messages with placeholders
     const storeNonText = (ctx: any, placeholder: string) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
@@ -136,8 +362,15 @@ export class TelegramChannel implements Channel {
         'Unknown';
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
 
-      const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
@@ -149,16 +382,9 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) =>
-      storeNonText(ctx, '[Voice message]'),
-    );
+    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
-    });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
       storeNonText(ctx, `[Sticker ${emoji}]`);
@@ -197,6 +423,46 @@ export class TelegramChannel implements Channel {
 
     try {
       const numericId = jid.replace(/^tg:/, '');
+      const media = this.parseOutboundMediaDirective(text);
+
+      if (media) {
+        if (!fs.existsSync(media.filePath) || !fs.statSync(media.filePath).isFile()) {
+          logger.warn(
+            { jid, mediaType: media.type, filePath: media.filePath },
+            'Media file not found, falling back to text send',
+          );
+        } else if (media.type === 'photo') {
+          await this.bot.api.sendPhoto(
+            numericId,
+            new InputFile(media.filePath),
+            media.caption ? { caption: media.caption } : undefined,
+          );
+          logger.info(
+            { jid, filePath: media.filePath, hasCaption: !!media.caption },
+            'Telegram photo sent',
+          );
+          return;
+        } else {
+          await this.bot.api.sendDocument(
+            numericId,
+            new InputFile(
+              media.filePath,
+              media.fileName || path.basename(media.filePath) || 'file',
+            ),
+            media.caption ? { caption: media.caption } : undefined,
+          );
+          logger.info(
+            {
+              jid,
+              filePath: media.filePath,
+              fileName: media.fileName,
+              hasCaption: !!media.caption,
+            },
+            'Telegram document sent',
+          );
+          return;
+        }
+      }
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
