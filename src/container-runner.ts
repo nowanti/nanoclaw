@@ -204,7 +204,16 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  return readEnvFile([
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_MODEL',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  ]);
 }
 
 function buildContainerArgs(
@@ -215,6 +224,43 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Pass Anthropic API configuration
+  const envConfig = readEnvFile([
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_MODEL',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  ]);
+  if (envConfig.ANTHROPIC_BASE_URL) {
+    args.push('-e', `ANTHROPIC_BASE_URL=${envConfig.ANTHROPIC_BASE_URL}`);
+  }
+  if (envConfig.CLAUDE_CODE_MODEL) {
+    args.push('-e', `CLAUDE_CODE_MODEL=${envConfig.CLAUDE_CODE_MODEL}`);
+  }
+  if (envConfig.ANTHROPIC_MODEL) {
+    args.push('-e', `ANTHROPIC_MODEL=${envConfig.ANTHROPIC_MODEL}`);
+  }
+  if (envConfig.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
+    args.push(
+      '-e',
+      `ANTHROPIC_DEFAULT_HAIKU_MODEL=${envConfig.ANTHROPIC_DEFAULT_HAIKU_MODEL}`,
+    );
+  }
+  if (envConfig.ANTHROPIC_DEFAULT_OPUS_MODEL) {
+    args.push(
+      '-e',
+      `ANTHROPIC_DEFAULT_OPUS_MODEL=${envConfig.ANTHROPIC_DEFAULT_OPUS_MODEL}`,
+    );
+  }
+  if (envConfig.ANTHROPIC_DEFAULT_SONNET_MODEL) {
+    args.push(
+      '-e',
+      `ANTHROPIC_DEFAULT_SONNET_MODEL=${envConfig.ANTHROPIC_DEFAULT_SONNET_MODEL}`,
+    );
+  }
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
