@@ -95,16 +95,12 @@ export class TelegramChannel implements Channel {
     return `${prefix}_${timestamp}_${random}.${ext}`;
   }
 
-  private parseOutboundMediaDirective(
-    text: string,
-  ):
-    | {
-        type: 'photo' | 'document';
-        filePath: string;
-        caption: string;
-        fileName?: string;
-      }
-    | null {
+  private parseOutboundMediaDirective(text: string): {
+    type: 'photo' | 'document';
+    filePath: string;
+    caption: string;
+    fileName?: string;
+  } | null {
     const photoMatch = text.match(/^\[Photo:\s*([^\]]+)\](?:\s*([\s\S]*))?$/);
     if (photoMatch) {
       return {
@@ -114,9 +110,7 @@ export class TelegramChannel implements Channel {
       };
     }
 
-    const docMatch = text.match(
-      /^\[Document:\s*([^\]]+)\](?:\s*([\s\S]*))?$/,
-    );
+    const docMatch = text.match(/^\[Document:\s*([^\]]+)\](?:\s*([\s\S]*))?$/);
     if (!docMatch) return null;
 
     const descriptor = docMatch[1].trim();
@@ -426,7 +420,10 @@ export class TelegramChannel implements Channel {
       const media = this.parseOutboundMediaDirective(text);
 
       if (media) {
-        if (!fs.existsSync(media.filePath) || !fs.statSync(media.filePath).isFile()) {
+        if (
+          !fs.existsSync(media.filePath) ||
+          !fs.statSync(media.filePath).isFile()
+        ) {
           logger.warn(
             { jid, mediaType: media.type, filePath: media.filePath },
             'Media file not found, falling back to text send',
